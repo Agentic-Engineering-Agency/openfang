@@ -399,10 +399,10 @@ impl LlmDriver for AnthropicDriver {
                     let mut event_type = String::new();
                     let mut data = String::new();
                     for line in event_text.lines() {
-                        if let Some(et) = line.strip_prefix("event: ") {
-                            event_type = et.to_string();
-                        } else if let Some(d) = line.strip_prefix("data: ") {
-                            data = d.to_string();
+                        if let Some(et) = line.strip_prefix("event:") {
+                            event_type = et.trim_start().to_string();
+                        } else if let Some(d) = line.strip_prefix("data:") {
+                            data = d.trim_start().to_string();
                         }
                     }
 
@@ -443,11 +443,14 @@ impl LlmDriver for AnthropicDriver {
                             }
                         }
                         "content_block_delta" => {
+                            let block_idx = json["index"].as_u64().unwrap_or(0) as usize;
                             let delta = &json["delta"];
                             match delta["type"].as_str().unwrap_or("") {
                                 "text_delta" => {
                                     if let Some(text) = delta["text"].as_str() {
-                                        if let Some(ContentBlockAccum::Text(ref mut t)) = blocks.last_mut() {
+                                        if let Some(ContentBlockAccum::Text(ref mut t)) =
+                                            blocks.get_mut(block_idx)
+                                        {
                                             t.push_str(text);
                                         }
                                         let _ = tx.send(StreamEvent::TextDelta { text: text.to_string() }).await;
@@ -455,7 +458,11 @@ impl LlmDriver for AnthropicDriver {
                                 }
                                 "input_json_delta" => {
                                     if let Some(partial) = delta["partial_json"].as_str() {
-                                        if let Some(ContentBlockAccum::ToolUse { ref mut input_json, .. }) = blocks.last_mut() {
+                                        if let Some(ContentBlockAccum::ToolUse {
+                                            ref mut input_json,
+                                            ..
+                                        }) = blocks.get_mut(block_idx)
+                                        {
                                             input_json.push_str(partial);
                                         }
                                         let _ = tx.send(StreamEvent::ToolInputDelta { text: partial.to_string() }).await;
@@ -463,7 +470,9 @@ impl LlmDriver for AnthropicDriver {
                                 }
                                 "thinking_delta" => {
                                     if let Some(thinking) = delta["thinking"].as_str() {
-                                        if let Some(ContentBlockAccum::Thinking(ref mut t)) = blocks.last_mut() {
+                                        if let Some(ContentBlockAccum::Thinking(ref mut t)) =
+                                            blocks.get_mut(block_idx)
+                                        {
                                             t.push_str(thinking);
                                         }
                                     }
@@ -472,13 +481,22 @@ impl LlmDriver for AnthropicDriver {
                             }
                         }
                         "content_block_stop" => {
-                            if let Some(ContentBlockAccum::ToolUse { id, name, input_json }) = blocks.last() {
-                                let input: serde_json::Value = serde_json::from_str(input_json).unwrap_or_default();
-                                let _ = tx.send(StreamEvent::ToolUseEnd {
-                                    id: id.clone(),
-                                    name: name.clone(),
-                                    input,
-                                }).await;
+                            let block_idx = json["index"].as_u64().unwrap_or(0) as usize;
+                            if let Some(ContentBlockAccum::ToolUse {
+                                id,
+                                name,
+                                input_json,
+                            }) = blocks.get(block_idx)
+                            {
+                                let input: serde_json::Value =
+                                    serde_json::from_str(input_json).unwrap_or_default();
+                                let _ = tx
+                                    .send(StreamEvent::ToolUseEnd {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                        input,
+                                    })
+                                    .await;
                             }
                         }
                         "message_delta" => {
@@ -552,14 +570,18 @@ fn convert_message(msg: &Message) -> ApiMessage {
                         name: name.clone(),
                         input: input.clone(),
                     }),
-                    ContentBlock::ToolResult { tool_use_id, content, is_error } => {
-                        Some(ApiContentBlock::ToolResult {
-                            tool_use_id: tool_use_id.clone(),
-                            content: content.clone(),
-                            is_error: *is_error,
-                        })
-                    }
-                    ContentBlock::Thinking { .. } | ContentBlock::Unknown => None,
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                        ..
+                    } => Some(ApiContentBlock::ToolResult {
+                        tool_use_id: tool_use_id.clone(),
+                        content: content.clone(),
+                        is_error: *is_error,
+                    }),
+                    ContentBlock::Thinking { .. } => None,
+                    ContentBlock::Unknown => None,
                 })
                 .collect();
             ApiContent::Blocks(api_blocks)
